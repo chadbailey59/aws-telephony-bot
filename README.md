@@ -101,6 +101,7 @@ You'll need two terminal windows open:
 
 ## Project Structure
 
+```
 aws-telephony-bot/
 ├── server/              # Python bot server
 │   ├── bot.py           # Main bot implementation
@@ -113,6 +114,7 @@ aws-telephony-bot/
 │   └── pcc-deploy.toml  # Pipecat Cloud deployment config
 ├── .gitignore           # Git ignore patterns
 └── README.md            # This file
+```
 
 This example is organized to be production-ready and easy to customize:
 - **`server.py`** - FastAPI server that handles dial-out requests
@@ -134,6 +136,16 @@ This example is organized to be production-ready and easy to customize:
   - `DialoutManager` class for retry logic
   - Handles the conversation with the person being called
   - Deployed to Pipecat Cloud in production or run locally for development
+
+## Managing AWS SageMaker Endpoints
+
+Use `sagemaker_manage.py` to manage SageMaker endpoints:
+
+```
+cd server
+uv run sagemaker_manage.py up
+uv run sagemaker_manage.py down
+```
 
 ## Deploying to Pipecat Cloud
 
