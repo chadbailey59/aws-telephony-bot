@@ -33,7 +33,7 @@ from pipecat.services.deepgram.sagemaker.stt import DeepgramSageMakerSTTService
 from typing import Any, Optional
 from pipecat.services.deepgram.sagemaker.tts import DeepgramSageMakerTTSService
 from pipecat.services.deepgram.tts import DeepgramTTSService
-from pipecat.runner.types import DailyRunnerArguments, RunnerArguments
+from pipecat.runner.types import RunnerArguments
 from dotenv import load_dotenv
 from pipecat.pipeline.runner import PipelineRunner
 from loguru import logger
@@ -115,22 +115,20 @@ class DialoutManager:
         return self._attempt_count < self._max_retries and not self._is_successful
 
 PROMPT = """
-You are a friendly AI assistant calling businesses to verify their addresses. Your responses are being converted to audio, so don't ues any special characters or emoji. Start by confirming you're speaking with someone at Tri-County Plumbing. Once you've confirmed that, ask if they are still located at 123 Main St in Austin, TX. If so, call the confirm_address function. If not, ask them for their new address, then call the update_address function. Once you're done, thank them for their time, then call the end_call function.
+You are a friendly AI assistant calling businesses to verify their addresses. Your responses are being converted to audio, so don't ues any special characters or emoji. Start by confirming you're speaking with someone at Tri-County Plumbing. Once you've confirmed that, ask if they are still located at 123 Main St in Austin, TX. If so, call the confirm_address function. If not, ask them for their new address, then call the update_address function. Once you've confirmed or updated their address, thank them for their time and tell them goodbye. When the user says goodbye, call the end_call function.
 """
 
 async def run_bot(
-    transport: BaseTransport, dialout_settings: DialoutSettings | None = None
+    transport: BaseTransport, dialout_settings: DialoutSettings
 ) -> None:
-    """Run the voice bot.
+    """Run the voice bot for an outbound call.
 
-    Sets up the bot pipeline with STT, LLM, and TTS services. If dialout_settings
-    is provided, initiates an outbound call with retry logic. Otherwise, waits for
-    a participant to join the Daily room directly (e.g. via browser).
+    Sets up the bot pipeline with STT, LLM, and TTS services, then initiates
+    the dialout and handles the conversation with retry logic.
 
     Args:
         transport: Daily transport for the call
-        dialout_settings: Phone number and optional caller ID for the outbound call.
-            If None, no dialout is performed.
+        dialout_settings: Phone number and optional caller ID for the outbound call
     """
     logger.info("Starting bot")
 
@@ -285,28 +283,27 @@ async def run_bot(
         ),
     )
 
-    if dialout_settings:
-        # Dialout mode: call a phone number with retry logic
-        dialout_manager = DialoutManager(transport, dialout_settings)
+    # Initialize dialout manager
+    dialout_manager = DialoutManager(transport, dialout_settings)
 
-        @transport.event_handler("on_joined")
-        async def on_joined(transport, data):
+    @transport.event_handler("on_joined")
+    async def on_joined(transport, data):
+        await dialout_manager.attempt_dialout()
+
+    @transport.event_handler("on_dialout_answered")
+    async def on_dialout_answered(transport, data):
+        logger.debug(f"Dial-out answered: {data}")
+        dialout_manager.mark_successful()
+
+    @transport.event_handler("on_dialout_error")
+    async def on_dialout_error(transport, data: Any):
+        logger.error(f"Dial-out error, retrying: {data}")
+
+        if dialout_manager.should_retry():
             await dialout_manager.attempt_dialout()
-
-        @transport.event_handler("on_dialout_answered")
-        async def on_dialout_answered(transport, data):
-            logger.debug(f"Dial-out answered: {data}")
-            dialout_manager.mark_successful()
-
-        @transport.event_handler("on_dialout_error")
-        async def on_dialout_error(transport, data: Any):
-            logger.error(f"Dial-out error, retrying: {data}")
-
-            if dialout_manager.should_retry():
-                await dialout_manager.attempt_dialout()
-            else:
-                logger.error(f"No more retries allowed, stopping bot.")
-                await task.cancel()
+        else:
+            logger.error(f"No more retries allowed, stopping bot.")
+            await task.cancel()
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -334,14 +331,7 @@ async def run_bot(
 
 
 async def bot(runner_args: RunnerArguments):
-    """Main bot entry point.
-
-    Supports two modes:
-    - Server mode (uv run bot.py -t daily): receives room_url, token, and
-      dialout_settings via runner_args.body from the webhook server.
-    - Direct mode (uv run bot.py -d): creates a Daily room and waits for a
-      participant to join via browser. No dialout is performed.
-    """
+    """Main bot entry point."""
     # Krisp is available when deployed to Pipecat Cloud
     if os.environ.get("ENV") != "local":
         from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
@@ -351,21 +341,11 @@ async def bot(runner_args: RunnerArguments):
         krisp_filter = None
 
     try:
-        if isinstance(runner_args, DailyRunnerArguments) and not runner_args.body:
-            # Direct mode: room_url/token come from the runner, no dialout
-            room_url = runner_args.room_url
-            token = runner_args.token
-            dialout_settings = None
-        else:
-            # Server mode: everything comes from the request body
-            request = AgentRequest.model_validate(runner_args.body)
-            room_url = request.room_url
-            token = request.token
-            dialout_settings = request.dialout_settings
+        request = AgentRequest.model_validate(runner_args.body)
 
         transport = DailyTransport(
-            room_url,
-            token,
+            request.room_url,
+            request.token,
             "Daily PSTN Bot",
             params=DailyParams(
                 api_key=os.getenv("DAILY_API_KEY"),
@@ -375,7 +355,7 @@ async def bot(runner_args: RunnerArguments):
             ),
         )
 
-        await run_bot(transport, dialout_settings)
+        await run_bot(transport, request.dialout_settings)
 
     except Exception as e:
         logger.error(f"Error running bot: {e}")
