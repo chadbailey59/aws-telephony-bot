@@ -40,7 +40,10 @@ from loguru import logger
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
 from pipecat.processors.aggregators.llm_response_universal import AssistantTurnStoppedMessage, UserTurnStoppedMessage
 from pipecat.processors.logger import FrameLogger
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import LLMRunFrame
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 
 load_dotenv(override=True)
@@ -111,6 +114,9 @@ class DialoutManager:
         """
         return self._attempt_count < self._max_retries and not self._is_successful
 
+PROMPT = """
+You are a friendly AI assistant calling businesses to verify their addresses. Your responses are being converted to audio, so don't ues any special characters or emoji. Start by confirming you're speaking with someone at Tri-County Plumbing. Once you've confirmed that, ask if they are still located at 123 Main St in Austin, TX. If so, call the confirm_address function. If not, ask them for their new address, then call the update_address function. Once you're done, thank them for their time, then call the end_call function.
+"""
 
 async def run_bot(
     transport: BaseTransport, dialout_settings: DialoutSettings | None = None
@@ -150,6 +156,7 @@ async def run_bot(
         ),
     )
 
+    # Text-to-Speech service (Deepgram direct, because I was having problems with SageMaker)
     tts = DeepgramTTSService(api_key=os.getenv("DEEPGRAM_API_KEY"), voice="aura-2-andromeda-en")
 
     # LLM service
@@ -157,14 +164,92 @@ async def run_bot(
         aws_region=os.getenv("AWS_REGION"),
         settings=AWSBedrockLLMService.Settings(
             model=os.getenv("AWS_BEDROCK_MODEL"),
-            system_instruction="You are a friendly AI assistant. Respond naturally and keep your answers conversational.",
+            system_instruction=PROMPT,
             temperature=0.8
         ),
     )
 
+    # Function calling tools
+    tools = ToolsSchema(standard_tools=[
+        FunctionSchema(
+            name="verify_address",
+            description="Verify that a given address is valid and properly formatted",
+            properties={
+                "street": {
+                    "type": "string",
+                    "description": "Street address, e.g. 123 Main St",
+                },
+                "city": {
+                    "type": "string",
+                    "description": "City name",
+                },
+                "state": {
+                    "type": "string",
+                    "description": "State abbreviation, e.g. CA",
+                },
+                "zip_code": {
+                    "type": "string",
+                    "description": "ZIP code",
+                },
+            },
+            required=["street", "city", "state", "zip_code"],
+        ),
+        FunctionSchema(
+            name="update_address",
+            description="Update the customer's address on file to a new address",
+            properties={
+                "street": {
+                    "type": "string",
+                    "description": "New street address, e.g. 123 Main St",
+                },
+                "city": {
+                    "type": "string",
+                    "description": "New city name",
+                },
+                "state": {
+                    "type": "string",
+                    "description": "New state abbreviation, e.g. CA",
+                },
+                "zip_code": {
+                    "type": "string",
+                    "description": "New ZIP code",
+                },
+            },
+            required=["street", "city", "state", "zip_code"],
+        ),
+        FunctionSchema(
+            name="end_call",
+            description="End the current phone call. Use when the user says goodbye or the conversation is complete.",
+            properties={},
+            required=[],
+        ),
+    ])
 
+    async def handle_verify_address(params: FunctionCallParams):
+        logger.info(f"verify_address called: {params.arguments}")
+        # TODO: integrate with a real address verification service
+        await params.result_callback({"valid": True, "formatted": (
+            f"{params.arguments['street']}, "
+            f"{params.arguments['city']}, "
+            f"{params.arguments['state']} "
+            f"{params.arguments['zip_code']}"
+        )})
 
-    context = LLMContext()
+    async def handle_update_address(params: FunctionCallParams):
+        logger.info(f"update_address called: {params.arguments}")
+        # TODO: integrate with a real customer database
+        await params.result_callback({"success": True, "message": "Address updated successfully."})
+
+    async def handle_end_call(params: FunctionCallParams):
+        logger.info("end_call called")
+        await params.result_callback({"success": True})
+        await task.cancel()
+
+    llm.register_function("verify_address", handle_verify_address)
+    llm.register_function("update_address", handle_update_address)
+    llm.register_function("end_call", handle_end_call)
+
+    context = LLMContext(tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -180,22 +265,13 @@ async def run_bot(
     # Pipeline - assembled from reusable components
     pipeline = Pipeline([
         transport.input(),
-
         stt,
-
         user_aggregator,
-
         llm,
-        fl,
-
+        # fl,
         tts,
-
-        
         transport.output(),
-
-        
         assistant_aggregator,
-
     ])
 
 
