@@ -155,7 +155,7 @@ async def run_bot(
     )
 
     # Text-to-Speech service (Deepgram direct, because I was having problems with SageMaker)
-    tts = DeepgramTTSService(api_key=os.getenv("DEEPGRAM_API_KEY"), voice="aura-2-andromeda-en")
+    # tts = DeepgramTTSService(api_key=os.getenv("DEEPGRAM_API_KEY"), voice="aura-2-andromeda-en")
 
     # LLM service
     llm = AWSBedrockLLMService(
